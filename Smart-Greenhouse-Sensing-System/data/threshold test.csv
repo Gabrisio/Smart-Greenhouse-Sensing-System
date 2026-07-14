@@ -1,0 +1,8 @@
+time_s,temperature_C,humidity_percent,light_raw,weight_raw,flow_L_min,pump_state,fan_state
+0,27.0,60,620,120000,0.0,OFF,OFF
+5,27.5,61,610,118000,0.0,OFF,OFF
+10,28.0,63,600,115000,0.0,OFF,OFF
+15,30.5,72,590,90000,0.0,OFF,ON
+20,31.5,76,580,70000,0.0,OFF,ON
+25,31.0,74,570,45000,1.8,ON,ON
+30,29.0,68,560,60000,1.4,ON,OFF
