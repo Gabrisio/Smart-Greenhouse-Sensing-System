@@ -1,0 +1,262 @@
+#include "DHT.h"
+#include "Adafruit_HX711.h"
+
+// -------------------- Pin Definitions --------------------
+#define DHTPIN 2
+#define DHTTYPE DHT22
+
+#define FLOW_SENSOR 3
+
+#define HX711_DT 4
+#define HX711_SCK 5
+
+#define PUMP_RELAY 7
+#define FAN_RELAY 8
+#define BUZZER 9
+#define PUMP_LED 10
+#define DARK_LED 11
+
+#define SOIL_PIN A0
+#define LDR_PIN A1
+
+// -------------------- Sensor Objects --------------------
+DHT dht(DHTPIN, DHTTYPE);
+Adafruit_HX711 hx711(HX711_DT, HX711_SCK);
+
+// -------------------- Thresholds --------------------
+// Change these depending on your real sensor readings
+int soilDryThreshold = 600;
+int ldrDarkThreshold = 60;
+
+float fanOnTemp = 30.0;
+float fanOffTemp =2
+9.5;
+
+long lowWaterThreshold = 600;
+
+int minFlowPulses = 2;
+
+// -------------------- System States --------------------
+bool pumpOn = false;
+bool fanOn = false;
+bool flowProblem = false;
+bool lowWater = false;
+
+bool pumpLedState = false;
+bool buzzerState = false;
+
+// -------------------- Timing Variables --------------------
+unsigned long lastSensorRead = 0;
+unsigned long lastFlowCheck = 0;
+unsigned long lastPumpLedBlink = 0;
+unsigned long lastBuzzerSwitch = 0;
+unsigned long pumpStartTime = 0;
+
+unsigned long flowGraceTime = 2000;
+
+// -------------------- Flow Sensor Pulses --------------------
+volatile unsigned long flowPulses = 0;
+
+// -------------------- Flow Sensor Function --------------------
+void countFlowPulse() {
+  flowPulses++;
+}
+
+// -------------------- Weight Sensor Average Function --------------------
+long readTankAverage() {
+  long sum = 0;
+
+  for (int i = 0; i < 10; i++) {
+    while (hx711.isBusy()) {
+      delay(1);
+    }
+
+    sum += hx711.readChannelRaw(CHAN_A_GAIN_128);
+    delay(50);
+  }
+
+  long average = sum / 10;
+  return average;
+}
+
+// -------------------- Setup --------------------
+void setup() {
+  Serial.begin(9600);
+  delay(1000);
+
+  dht.begin();
+  hx711.begin();
+
+  pinMode(FLOW_SENSOR, INPUT_PULLUP);
+
+  pinMode(PUMP_RELAY, OUTPUT);
+  pinMode(FAN_RELAY, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(PUMP_LED, OUTPUT);
+  pinMode(DARK_LED, OUTPUT);
+
+  // Your relays are active HIGH:
+  // HIGH = ON
+  // LOW = OFF
+  digitalWrite(PUMP_RELAY, LOW);
+  digitalWrite(FAN_RELAY, LOW);
+
+  digitalWrite(PUMP_LED, LOW);
+  digitalWrite(DARK_LED, LOW);
+  noTone(BUZZER);
+
+  attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR), countFlowPulse, RISING);
+
+  Serial.println("Smart Greenhouse Started");
+}
+
+// -------------------- Main Loop --------------------
+void loop() {
+  unsigned long now = millis();
+
+  // Read sensors every 1 second
+  if (now - lastSensorRead >= 1000) {
+    lastSensorRead = now;
+
+    int soilValue = analogRead(SOIL_PIN);
+    int ldrValue = analogRead(LDR_PIN);
+
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+
+    long tankAverage = readTankAverage();
+
+    // Soil is dry if the soil reading is above the threshold
+    bool soilDry = soilValue > soilDryThreshold;
+
+    // Low water if tank reading is below the threshold
+    lowWater = tankAverage < lowWaterThreshold;
+
+    // Pump turns ON only if soil is dry and tank has enough water
+    if (soilDry && !lowWater) {
+      if (!pumpOn) {
+        pumpOn = true;
+        pumpStartTime = now;
+        flowProblem = false;
+
+        noInterrupts();
+        flowPulses = 0;
+        interrupts();
+      }
+    } else {
+      pumpOn = false;
+      flowProblem = false;
+    }
+
+    digitalWrite(PUMP_RELAY, pumpOn ? HIGH : LOW);
+
+    // Fan turns ON at high temperature and OFF at lower temperature
+    if (!isnan(temperature)) {
+      if (temperature >= fanOnTemp) {
+        fanOn = true;
+      }
+
+      if (temperature <= fanOffTemp) {
+        fanOn = false;
+      }
+    }
+
+    digitalWrite(FAN_RELAY, fanOn ? HIGH : LOW);
+
+    // D11 LED turns ON when it is dark
+    if (ldrValue < ldrDarkThreshold) {
+      digitalWrite(DARK_LED, HIGH);
+    } else {
+      digitalWrite(DARK_LED, LOW);
+    }
+
+    // Serial Monitor readings
+    Serial.println("--------------------");
+
+    Serial.print("Soil = ");
+    Serial.println(soilValue);
+
+    Serial.print("LDR = ");
+    Serial.println(ldrValue);
+
+    Serial.print("Temperature = ");
+    Serial.println(temperature);
+
+    Serial.print("Humidity = ");
+    Serial.println(humidity);
+
+    Serial.print("Tank average = ");
+    Serial.println(tankAverage);
+
+    Serial.print("Low water = ");
+    Serial.println(lowWater ? "YES" : "NO");
+
+    Serial.print("Pump = ");
+    Serial.println(pumpOn ? "ON" : "OFF");
+
+    Serial.print("Fan = ");
+    Serial.println(fanOn ? "ON" : "OFF");
+  }
+
+  // Check water flow only when pump is ON
+  if (pumpOn && now - lastFlowCheck >= 1000) {
+    lastFlowCheck = now;
+
+    noInterrupts();
+    unsigned long pulses = flowPulses;
+    flowPulses = 0;
+    interrupts();
+
+    Serial.print("Flow pulses/sec = ");
+    Serial.println(pulses);
+
+    // Give pump 2 seconds before checking flow problem
+    if (now - pumpStartTime > flowGraceTime) {
+      if (pulses < minFlowPulses) {
+        flowProblem = true;
+      } else {
+        flowProblem = false;
+      }
+    }
+  }
+
+  // If pump is OFF, there cannot be a flow problem
+  if (!pumpOn) {
+    flowProblem = false;
+  }
+
+  // D10 pump LED behavior
+  if (!pumpOn) {
+    digitalWrite(PUMP_LED, LOW);
+  } else if (flowProblem) {
+    if (now - lastPumpLedBlink >= 150) {
+      lastPumpLedBlink = now;
+      pumpLedState = !pumpLedState;
+      digitalWrite(PUMP_LED, pumpLedState);
+    }
+  } else {
+    digitalWrite(PUMP_LED, HIGH);
+  }
+
+  // Buzzer behavior
+  if (flowProblem) {
+    // Flow problem: continuous buzzer
+    tone(BUZZER, 1000);
+  } else if (lowWater) {
+    // Low water: buzzer ON 2 seconds, OFF 2 seconds
+    if (now - lastBuzzerSwitch >= 2000) {
+      lastBuzzerSwitch = now;
+      buzzerState = !buzzerState;
+
+      if (buzzerState) {
+        tone(BUZZER, 1000);
+      } else {
+        noTone(BUZZER);
+      }
+    }
+  } else {
+    // No problem: buzzer OFF
+    noTone(BUZZER);
+    buzzerState = false;
+  }
+}
